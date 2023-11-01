@@ -10,6 +10,7 @@ Currently, Starfish is tested with WSL, Brew and Ubuntu.
 
 ## Setup Starfish
 
+
 - Clone the repository
 - Run composer install
 - Run sail npm install
@@ -19,7 +20,7 @@ Currently, Starfish is tested with WSL, Brew and Ubuntu.
 - Run sail npm run dev
 - Open http://localhost
 
-
+- 
 ## License
 
 The Laravel framework is open-sourced software licensed under the [Apache License, Version 2.0](https://opensource.org/license/apache-2-0/).
