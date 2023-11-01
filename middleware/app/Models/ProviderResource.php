@@ -15,9 +15,7 @@ class ProviderResource extends Model
         'external_resource_id', // External Resource ID
         'provider_id',          // ProviderPlatform ID
     ];
-    protected $casts = [
-        'type' => ProviderResourceType::class,
-    ];
+
     public function __construct(array $attributes = [])
     {
         parent::__construct($attributes);

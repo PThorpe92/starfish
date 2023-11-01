@@ -5,6 +5,29 @@ declare(strict_types=1);
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\RequestException;
 use App\Models\ProviderPlatform;
+use Psr\Http\Message\ResponseInterface;
+use App\Http\Requests\StudentEnrollmentRequest;
+
+/**
+ * Class CanvasServices
+ * constants for canvas API routes
+ */
+const CANVAS_API = 'api/v1/';
+const API_ERROR = 'API Request Error: ';
+const USERS = 'users/';
+const ACCOUNTS = 'accounts/';
+const COURSES = 'courses/';
+const ENROLLMENTS = 'enrollments/';
+const ASSIGNMENTS = 'assignments/';
+const SUBMISSIONS = 'submissions/';
+const STUDENTS = 'students/';
+const ACTIVITY_STREAM = 'activity_stream/';
+const SELF = 'self/';
+const PROGRESS = 'progress/';
+const SECTIONS  = 'sections/';
+const GRADEABLE_STUDENTS = 'gradeable_students/';
+const READ = 'read/';
+const ANONYMOUS_SUBMISSIONS = 'anonymous_submissions/';
 use App\Models\ProviderUserResource;
 
 class CanvasServices
@@ -13,6 +36,8 @@ class CanvasServices
     private int $account_id;
     private string $access_key;
     private string $base_url;
+    private string $api_url;
+    public Client $client;
 
     public function __construct(int $providerId, int $accountId, string $apiKey, string $url)
     {
@@ -20,7 +45,15 @@ class CanvasServices
         $this->account_id = $accountId;
         $this->access_key =  $apiKey;
         $this->base_url = $url;
+        $this->api_url = $url . CANVAS_API;
+        $this->client = $this->getClient();
     }
+
+    public function getAccountId(): int
+    {
+        return $this->account_id;
+    }
+
     public function getAccessKey(): string
     {
         return $this->base_url;
@@ -30,6 +63,53 @@ class CanvasServices
         return $this->base_url;
     }
 
+
+    /* Helper function to return an HTTP client set with access key
+    * @return GuzzleHttp\Client
+    */
+    function getClient(): GuzzleHttp\Client
+    {
+        return new Client(["Headers" => ['Authorization' => 'Bearer' . $this->access_key]]);
+    }
+
+    /*
+     * Formats a given Course object and returns a Canvas LTI Deep Link
+    * @param object $course
+    * @param string $baseUrl
+    * @return array
+     */
+    public function formatLtiLinking($course): array
+    {
+        $link = [
+            'type' => 'ltiResourceLink',
+            'title' => $course->name,
+            'url' => $this->base_url . '/courses/' . $course->id,
+            'icon' => [
+                'url' => 'https://www.instructure.com/favicon.ico',
+                'width' => 50,
+                'height' => 50
+            ]
+        ];
+        return $link;
+    }
+
+    // Returns an instance of CanvasServices to make dynamic API calls.
+    /*****************************************************
+    //* @param int $providerId
+    //* @return  CanvasServices
+    //* @throws \InvalidArgumentException
+     */
+    public static function byProviderId(int $providerId): CanvasServices | \InvalidArgumentException
+    {
+        $provider = ProviderPlatform::where('id', $providerId)->first();
+        if (!$provider) {
+            throw new \InvalidArgumentException('Invalid provider ID');
+        }
+        return new self($provider->provider_id, $provider->account_id, $provider->access_key, $provider->base_url);
+    }
+
+    /**
+     * validate and format the account ID parameter for API URLs
     // Turns a canvas specific course into a LTI deep linking JSON structure
     /***************************************************************
      * @param string $courseId
@@ -120,6 +200,15 @@ class CanvasServices
      * @return string Formatted account or user ID
      * @throws \InvalidArgumentException If the account ID is invalid
      */
+
+    public static function fmtUrl(string $id): string
+    {
+        if (substr($id, -1) !== '/') {
+            $id .= '/';
+        }
+        return $id;
+    }
+
     public function fmtAndValidateId(string $id): string
     {
         if ($id === 'self' || is_numeric($id)) {
@@ -142,6 +231,51 @@ class CanvasServices
         }
     }
 
+    // This is the cache refresh function (makes API calls directly)
+    // ****************************************************
+    // route::get('/api/v1/users/{user_id}/courses')
+    //*****************************************************
+    // @param Request $request
+    // @return Illuminate\Http\JsonResponse
+    // ****************************************************
+    public function refreshEnrollmentCache(StudentEnrollmentRequest $request): \Illuminate\Http\JsonResponse
+    {
+        $userId = $request->input('user_id');
+        if (!$userId) {
+            return response()->json(['error' => 'Missing user_id'], 400);
+        }
+        // Get all the available provider IDs
+        $providerIds = ProviderPlatform::select('id')->get()->toArray();
+        $links = [];
+
+        if (!count($providerIds)) {
+            return response()->json(['error' => 'There are no registerd providers for this student ID'], 400);
+        } else {
+            foreach ($providerIds as $id) {
+                // Each iteration will instantiate a new CanvasUtil object
+                // and query the Canvas API for the user's courses
+                $canvasUtil = \CanvasServices::byProviderId($id);
+                $enrollments = $canvasUtil->listCoursesForUser($userId);
+                // Obviously we would just query the DB and return the enrollments for the user,
+                // but for the prototype we demonstrate how the information is fetched.
+                $links = [];
+                foreach ($enrollments as $course) {
+                    // Create the LTI deep linking JSON structure
+                    $link = $canvasUtil->formatLtiLinking($course);
+                    // append each resource link
+                    $links[] = $link;
+                }
+                if (empty($links)) {
+                    return response()->json(['error' => 'No Provider Resources Found'], 400);
+                }
+                // Wrap the links in a container object if needed
+                $response = ['@context' => 'http://purl.imsglobal.org/ctx/lti/v1/ContentItem', 'items' => $links];
+                return response()->json($response);
+            }
+        }
+        return response()->json(['error' => 'invalid request body'], 400);
+    }
+
     /**
      * Get a list of users from Canvas
      *
@@ -154,19 +288,12 @@ class CanvasServices
      */
     public function listUsers(string $accountId = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $access_key = $this->access_key;
-
-        $client = new Client([
-            'headers' => [
-                'Authorization' => 'Bearer ' . $access_key,
-            ],
-        ]);
-        $accountId = self::fmtAndValidateId($accountId);
+        $base_url = $this->api_url . ACCOUNTS . self::fmtUrl($accountId) . USERS;
         try {
-            $response = $client->get($base_url . 'accounts/' . $accountId . 'users');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
+
         }
         return self::handleResponse($response);
     }
@@ -179,20 +306,13 @@ class CanvasServices
      */
     public function showUserDetails(string $userId = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $access_key = $this->access_key;
-
-        $client = new Client([
-            'base_uri' => $base_url,
-            'headers' => [
-                'Authorization' => 'Bearer ' . $access_key,
-            ],
-        ]);
-        $userId = self::fmtAndValidateId($userId);
+        $base_url = $this->api_url . USERS . $userId;
         try {
-            $response = $client->get($base_url . 'users/' . $userId);
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
+
+
         }
         return self::handleResponse($response);
     }
@@ -206,7 +326,7 @@ class CanvasServices
      * @return mixed (decoded json)
      * @throws \Exception
      */
-    public function createUser(string $name, string $email, bool $terms = true): mixed
+    public function createStudentInCanvas(string $name, string $email, bool $terms = true): mixed
     {
 
         $userData = [
@@ -221,16 +341,12 @@ class CanvasServices
             ],
             'force_validations' => true,
         ];
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;
 
-        $client = new Client([
-            'Authorization' => 'Bearer ' . $apiKey,
-        ]);
+        $base_url = $this->api_url . ACCOUNTS . SELF . USERS;
         try {
-            $response = $client->post($base_url . "accounts/self/users/", $userData);
+            $response = $this->client->post($base_url, $userData);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -244,18 +360,12 @@ class CanvasServices
      */
     public function listActivityStream(string $account = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;
 
-        $client = new Client([
-            'Authorization' => 'Bearer ' . $apiKey,
-        ]);
+        $base_url = $this->api_url . USERS . self::fmtUrl($account) . ACTIVITY_STREAM;
         try {
-            $account = self::fmtAndValidateId($account);
-
-            $response = $client->get($base_url . 'users/' . $account . 'activity_stream');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -268,18 +378,11 @@ class CanvasServices
      */
     public function getActivityStreamSummary(string $account = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;
-
-        $client = new Client([
-            'Authorization' => 'Bearer ' . $apiKey,
-        ]);
-        $account = self::fmtAndValidateId($account);
-
+        $base_url = $this->api_url . USERS .  self::fmtUrl($account) . ACTIVITY_STREAM . 'summary';
         try {
-            $response = $client->get($base_url . 'users/' .  $account . 'activity_stream/summary');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -292,18 +395,11 @@ class CanvasServices
      */
     public function listTodoItems(string $account = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;
-
-        $client = new Client([
-            'Authorization' => 'Bearer ' . $apiKey,
-        ]);
-        $account = self::fmtAndValidateId($account);
-
+        $base_url = $this->api_url . USERS .  self::fmtUrl($account) . 'todo';
         try {
-            $response = $client->get($base_url . 'users/' .  $account . 'todo');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -316,18 +412,11 @@ class CanvasServices
      **/
     public function getTodoItemsCount(string $account = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;
-
-        $client = new Client([
-            'Authorization' => 'Bearer ' . $apiKey,
-        ]);
-        $account = self::fmtAndValidateId($account);
-
+        $base_url = $this->api_url . USERS .  self::fmtUrl($account) . 'todo_item_count';
         try {
-            $response = $client->get($base_url . 'users/' .  $account . 'todo_item_count');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -338,21 +427,13 @@ class CanvasServices
      * @return mixed (decoded json)
      * @throws \Exception
      */
-
     public function listUpcomingAssignments(string $userId = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;
-
-        $client = new Client([
-            'Authorization' => 'Bearer ' . $apiKey,
-        ]);
-        $userId = self::fmtAndValidateId($userId);
-
+        $base_url = $this->api_url .  USERS .  self::fmtUrl($userId) . 'upcoming_events';
         try {
-            $response = $client->get($base_url . 'users/' .  $userId . 'upcoming_events');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -365,18 +446,11 @@ class CanvasServices
      */
     public function listMissingSubmissions(string $userId = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;
-
-        $client = new Client([
-            'Authorization' => 'Bearer ' . $apiKey,
-        ]);
-        $userId = self::fmtAndValidateId($userId);
-
+        $base_url = $this->api_url . USERS .  self::fmtUrl($userId) . 'missing_submissions';
         try {
-            $response = $client->get($base_url . 'users/' .  $userId . 'missing_submissions');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -387,16 +461,11 @@ class CanvasServices
      **/
     public function listCourses(): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;
-
-        $client = new Client([
-            'Authorization' => 'Bearer ' . $apiKey,
-        ]);
+        $base_url = $this->api_url . COURSES;
         try {
-            $response = $client->get($base_url . 'courses');
+            $response = $this->client->get($base_url . COURSES);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -410,18 +479,11 @@ class CanvasServices
      **/
     public function listCoursesForUser(string $userId = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;
-
-        $client = new Client([
-            'Authorization' => 'Bearer ' . $apiKey,
-        ]);
-        $userId = self::fmtAndValidateId($userId);
-
+        $base_url = $this->api_url . USERS . self::fmtUrl($userId) . COURSES;
         try {
-            $response = $client->get($base_url . 'users/' . $userId . 'courses');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -441,17 +503,11 @@ class CanvasServices
      * */
     public function getUserCourseProgress(string $userId = 'self', string $courseId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;
-        $client = new Client([
-            'Authorization' => 'Bearer ' . $apiKey,
-        ]);
-        $userId = self::fmtAndValidateId($userId);
-
+        $base_url = $this->api_url . COURSES . self::fmtUrl($courseId) . USERS . self::fmtUrl($userId) . PROGRESS;
         try {
-            $response = $client->get($base_url . 'courses/' . $courseId . '/users/' . $userId . 'progress');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -463,18 +519,15 @@ class CanvasServices
      * */
     public function getEnrollmentsByUser(string $userId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
-        $userId = self::fmtAndValidateId($userId);
-
+        $base_url = $this->api_url .  USERS . self::fmtUrl($userId) . ENROLLMENTS;
         try {
-            $response = $client->get($base_url . 'users/' . $userId . 'enrollments');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
+
     /**
      * List Enrollments from Canvas by Course ID
      * @param string $
@@ -483,14 +536,11 @@ class CanvasServices
      **/
     public function getEnrollmentsByCourse(string $courseId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
-
+        $base_url = $this->api_url . COURSES . self::fmtUrl($courseId) . ENROLLMENTS;
         try {
-            $response = $client->get($base_url . 'courses/' . $courseId . '/enrollments');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -502,13 +552,11 @@ class CanvasServices
      **/
     public function getEnrollmentsBySection(string $sectionId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url . SECTIONS . self::fmtUrl($sectionId) . ENROLLMENTS;
         try {
-            $response = $client->get($base_url . 'sections/' . $sectionId . '/enrollments');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception('API_ERROR ' . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -527,15 +575,11 @@ class CanvasServices
             'user_id' => [$userId],
             'type' => [$type],
         ];
-
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
-
+        $base_url = $this->api_url . COURSES . self::fmtUrl($courseId) . ENROLLMENTS . $enrollment;
         try {
-            $response = $client->post($base_url . 'courses/' . $courseId . '/enrollments' . $enrollment);
+            $response = $this->client->post($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception('API_ERROR ' . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -554,13 +598,11 @@ class CanvasServices
             'user_id' => [$userId],
             'type' => [$type],
         ];
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url . SECTIONS . self::fmtUrl($sectionId) . ENROLLMENTS . $enrollment;
         try {
-            $response = $client->post($base_url . 'sections/' . $sectionId . '/enrollments' . $enrollment);
+            $response = $this->client->post($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -573,13 +615,11 @@ class CanvasServices
      */
     public function deleteEnrollment(string $enrollmentId, string $courseId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url  . COURSES . self::fmtUrl($courseId) . ENROLLMENTS . $enrollmentId;
         try {
-            $response = $client->delete($base_url . 'courses/' . $courseId . '/enrollments/' . $enrollmentId);
+            $response = $this->client->delete($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -592,15 +632,11 @@ class CanvasServices
      */
     public function acceptCourseInvitation(string $courseId, string $userId = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
-        $userId = self::fmtAndValidateId($userId);
-
+        $base_url = $this->api_url  . COURSES . self::fmtUrl($courseId) . ENROLLMENTS . self::fmtUrl($userId) . 'accept';
         try {
-            $response = $client->post($base_url . 'courses/' . $courseId . '/enrollments/' . $userId . 'accept');
+            $response = $this->client->post($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -613,15 +649,11 @@ class CanvasServices
      */
     public function rejectCourseInvitation(string $courseId, string $userId = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
-        $userId = self::fmtAndValidateId($userId);
-
+        $base_url = $this->api_url  . COURSES . self::fmtUrl($courseId) . ENROLLMENTS . self::fmtUrl($userId) . 'reject';
         try {
-            $response = $client->post($base_url . 'courses/' . $courseId . '/enrollments/' . $userId . 'reject');
+            $response = $this->client->post($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -634,15 +666,11 @@ class CanvasServices
      **/
     public function reactivateCourseEnrollment(string $courseId, string $userId = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
-        $userId = self::fmtAndValidateId($userId);
-
+        $base_url = $this->api_url  . COURSES . self::fmtUrl($courseId) . ENROLLMENTS . self::fmtUrl($userId) . 'reactivate';
         try {
-            $response = $client->put($base_url . 'courses/' . $courseId . '/enrollments/' . $userId . 'reactivate');
+            $response = $this->client->put($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -655,15 +683,11 @@ class CanvasServices
      **/
     public function addLastAttendedDate(string $courseId, string $userId = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
-        $userId = self::fmtAndValidateId($userId);
-
+        $base_url = $this->api_url . COURSES . self::fmtUrl($courseId) . ENROLLMENTS . self::fmtUrl($userId) . 'last_attended';
         try {
-            $response = $client->put($base_url . 'courses/' . $courseId . '/enrollments/' . $userId . 'last_attended');
+            $response = $this->client->put($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -676,15 +700,11 @@ class CanvasServices
      **/
     public function queryUserProgress(string $userId = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
-        $userId = self::fmtAndValidateId($userId);
-
+        $base_url = $this->api_url . PROGRESS . $userId;
         try {
-            $response = $client->get($base_url . 'progress/' . $userId);
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -696,14 +716,11 @@ class CanvasServices
      **/
     public function cancelUserProgress(string $userId = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
-        $userId = self::fmtAndValidateId($userId);
+        $base_url = $this->api_url  . PROGRESS . $userId;
         try {
-            $response = $client->post($base_url . 'progress/' . $userId);
+            $response = $this->client->post($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -716,15 +733,11 @@ class CanvasServices
      **/
     public function listAssignmentsForUser(string $courseId, string $userId = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
-        $userId = self::fmtAndValidateId($userId);
-
+        $base_url = $this->api_url . USERS . self::fmtUrl($userId) . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS;
         try {
-            $response = $client->get($base_url . 'users/' . $userId . 'courses' . $courseId . '/assignments');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -736,13 +749,11 @@ class CanvasServices
      **/
     public function listAssignmentsByCourse(string $courseId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url  . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS;
         try {
-            $response = $client->get($base_url . 'courses/' . $courseId . '/assignments');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -754,13 +765,11 @@ class CanvasServices
      **/
     public function listAssignmentGroupsByCourse(string $assignmentGroupId, string $courseId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url . COURSES . self::fmtUrl($courseId) . 'assignment_groups/' . self::fmtUrl($assignmentGroupId) . ASSIGNMENTS;
         try {
-            $response = $client->get($base_url . 'courses/' . $courseId . '/assignment_groups/' . $assignmentGroupId . '/assignments');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -773,13 +782,11 @@ class CanvasServices
      **/
     public function deleteAssignment(string $courseId, string $assignmentId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS . $assignmentId;
         try {
-            $response = $client->delete($base_url . 'courses/' . $courseId . '/assignments/' . $assignmentId);
+            $response = $this->client->delete($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -793,13 +800,11 @@ class CanvasServices
      **/
     public function getAssignment(string $courseId, string $assignmentId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS . $assignmentId;
         try {
-            $response = $client->get($base_url . 'courses/' . $courseId . '/assignments/' . $assignmentId);
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -816,13 +821,11 @@ class CanvasServices
         **/
     public function createAssignmentForCourse(array $assignmentInfo, string $courseId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url  . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS . $assignmentInfo;
         try {
-            $response = $client->post($base_url . 'courses/' . $courseId . '/assignments' . $assignmentInfo);
+            $response = $this->client->post($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -841,13 +844,11 @@ class CanvasServices
         **/
     public function editAssignmentForCourse(array $assignmentInfo, string $courseId, string  $assignmentId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS . self::fmtUrl($assignmentId) . $assignmentInfo;
         try {
-            $response = $client->put($base_url . 'courses/' . $courseId . '/assignments' . $assignmentId . '/' . $assignmentInfo);
+            $response = $this->client->put($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -865,14 +866,11 @@ class CanvasServices
         **/
     public function submitAssignment(string $courseId, string $assignmentId, array $assignment): mixed
     {
-
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS . self::fmtUrl($assignmentId) . SUBMISSIONS . $assignment;
         try {
-            $response = $client->post($base_url . 'courses/' . $courseId . '/assignments/' . $assignmentId . '/submissions' . $assignment);
+            $response = $this->client->post($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -886,14 +884,11 @@ class CanvasServices
         **/
     public function getAssignmentSubmissions(string $courseId, string $assignmentId): mixed
     {
-
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS . self::fmtUrl($assignmentId) . SUBMISSIONS;
         try {
-            $response = $client->get($base_url . 'courses/' . $courseId . '/assignments/' . $assignmentId . '/submissions');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -907,13 +902,11 @@ class CanvasServices
         **/
     public function getSubmissionsForMultipleAssignments(string $courseId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url  . COURSES . self::fmtUrl($courseId) . STUDENTS . SUBMISSIONS;
         try {
-            $response = $client->get($base_url . 'courses/' . $courseId . '/students' .  '/submissions');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -928,13 +921,11 @@ class CanvasServices
         **/
     public function getSubmissionForUser(string $courseId, string $assignmentId, string $userId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url  . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS . self::fmtUrl($assignmentId) . SUBMISSIONS . $userId;
         try {
-            $response = $client->get($base_url . 'courses/' . $courseId . '/assignments' .  $assignmentId . '/submissions' . $userId);
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -949,13 +940,11 @@ class CanvasServices
         **/
     public function getSubmissionForAnonID(string $courseId, string $assignmentId, string $anonId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS .  self::fmtUrl($assignmentId) . ANONYMOUS_SUBMISSIONS . $anonId;
         try {
-            $response = $client->get($base_url . 'courses/' . $courseId . '/assignments' .  $assignmentId . '/anonymous_submissions' . $anonId);
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -970,15 +959,11 @@ class CanvasServices
         **/
     public function uploadFileForSubmission(string $courseId, string $assignmentId, string $userId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
-        $userId = self::fmtAndValidateId($userId);
-
+        $base_url = $this->api_url . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS .  self::fmtUrl($assignmentId) . SUBMISSIONS . self::fmtUrl($userId) . 'files';
         try {
-            $response = $client->post($base_url . 'courses/' . $courseId . '/assignments' .  $assignmentId . '/submissions' . $userId . 'files');
+            $response = $this->client->post($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -993,15 +978,11 @@ class CanvasServices
         **/
     public function gradeOrCommentSubmission(string $courseId, string $assignmentId, string  $userId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
-        $userId = self::fmtAndValidateId($userId);
-
+        $base_url = $this->api_url  . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS .  self::fmtUrl($assignmentId) . SUBMISSIONS . $userId;
         try {
-            $response = $client->put($base_url . 'courses/' . $courseId . '/assignments' .  $assignmentId . '/submissions' . $userId);
+            $response = $this->client->put($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -1016,13 +997,11 @@ class CanvasServices
         **/
     public function gradeOrCommentSubmissionAnon(string $courseId, string $assignmentId, string $anonId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url  . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS .  self::fmtUrl($assignmentId) . ANONYMOUS_SUBMISSIONS . $anonId;
         try {
-            $response = $client->put($base_url . 'courses/' . $courseId . '/assignments' .  $assignmentId . '/anonymous_submissions' . $anonId);
+            $response = $this->client->put($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -1036,13 +1015,11 @@ class CanvasServices
         **/
     public function listGradeableStudents(string $courseId, string $assignmentId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url  . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS .  self::fmtUrl($assignmentId) . GRADEABLE_STUDENTS;
         try {
-            $response = $client->get($base_url . 'courses/' . $courseId . '/assignments' .  $assignmentId . '/gradeable_students');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -1055,13 +1032,11 @@ class CanvasServices
         **/
     public function listMultipleAssignmentsGradeableStudents(string $courseId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url  . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS . GRADEABLE_STUDENTS;
         try {
-            $response = $client->get($base_url . 'courses/' . $courseId . '/assignments' . '/gradeable_students');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -1076,15 +1051,11 @@ class CanvasServices
         **/
     public function markSubmissionAsRead(string $courseId, string $assignmentId, string $userId = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
-        $userId = self::fmtAndValidateId($userId);
-
+        $base_url = $this->api_url  . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS . self::fmtUrl($assignmentId) . SUBMISSIONS . self::fmtUrl($userId) . READ;
         try {
-            $response = $client->put($base_url . 'courses/' . $courseId . '/assignments/' . $assignmentId . '/submissions/' . $userId . 'read');
+            $response = $this->client->put($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -1101,15 +1072,11 @@ class CanvasServices
         **/
     public function markSubmissionItemAsRead(string $courseId, string $assignmentId, string $userId = 'self', string $item): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
-        $userId = self::fmtAndValidateId($userId);
-
+        $base_url = $this->api_url  . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS . self::fmtUrl($assignmentId) . SUBMISSIONS . self::fmtUrl($userId) . READ . $item;
         try {
-            $response = $client->put($base_url . 'courses/' . $courseId . '/assignments/' . $assignmentId . '/submissions/' . $userId . 'read' . $item);
+            $response = $this->client->put($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -1124,14 +1091,11 @@ class CanvasServices
         **/
     public function markSubmissionAsUnread(string $courseId, string $assignmentId, string $userId = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
-        $userId = self::fmtAndValidateId($userId);
+        $base_url = $this->api_url  . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS . self::fmtUrl($assignmentId) . SUBMISSIONS . self::fmtUrl($userId) . READ;
         try {
-            $response = $client->delete($base_url . 'courses/' . $courseId . '/assignments/' . $assignmentId . '/submissions/' . $userId . 'read');
+            $response = $this->client->delete($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -1146,15 +1110,11 @@ class CanvasServices
         **/
     public function clearUnreadStatusForAllSubmissions(string $courseId, string $userId = 'self'): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
-        $userId = self::fmtAndValidateId($userId);
-
+        $base_url = $this->api_url  . COURSES . self::fmtUrl($courseId) . SUBMISSIONS . self::fmtUrl($userId) . 'clear_unread';
         try {
-            $response = $client->put($base_url . 'courses/' . $courseId . '/submissions/' . $userId . 'clear_unread');
+            $response = $this->client->put($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }
@@ -1168,13 +1128,11 @@ class CanvasServices
         **/
     public function getSubmissionSummary(string $courseId, string $assignmentId): mixed
     {
-        $base_url = $this->base_url . "api/v1/";
-        $apiKey = $this->access_key;;
-        $client = new Client(['Authorization' => 'Bearer' . $apiKey]);
+        $base_url = $this->api_url . COURSES . self::fmtUrl($courseId) . ASSIGNMENTS . self::fmtUrl($assignmentId) . 'submission_summary';
         try {
-            $response = $client->get($base_url . 'courses/' . $courseId . '/assignments/' . $assignmentId . '/submission_summary');
+            $response = $this->client->get($base_url);
         } catch (RequestException $e) {
-            throw new \Exception('API request failed: ' . $e->getMessage());
+            throw new \Exception(API_ERROR . $e->getMessage());
         }
         return self::handleResponse($response);
     }

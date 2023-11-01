@@ -11,16 +11,13 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('provider_platforms', function (Blueprint $table) {
+        Schema::create('provider_contents', function (Blueprint $table) {
             $table->id();
-            $table->timestamps();
+            $table->string('content_id');
+            $table->string('external_resource_id');
             $table->string('type');
-            $table->string('name');
-            $table->string('description');
-            $table->string('icon_url');
-            $table->string('account_id');
-            $table->string('access_key');
-            $table->string('base_url');
+            $table->string('provider_platform_id');
+            $table->timestamps();
         });
     }
 
@@ -29,6 +26,6 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::dropIfExists('provider_platforms');
+        Schema::dropIfExists('provider_contents');
     }
 };

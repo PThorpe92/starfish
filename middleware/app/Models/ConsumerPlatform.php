@@ -21,10 +21,6 @@ class ConsumerPlatform extends Model
         'api_key',
     ];
 
-    protected $casts = [
-        'type' => ConsumerPlatformType::class
-    ];
-
     public function platformConnections(): HasMany
     {
         return $this->hasMany(PlatformConnections::class);
