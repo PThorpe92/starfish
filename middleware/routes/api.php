@@ -28,3 +28,4 @@ Route::prefix('v1')->group(function () {
     Route::get('students.courses', [StudentEnrollmentController::class, 'show']);
     Route::patch('students.courses', [StudentEnrollmentController::class, 'update']);
 });
+

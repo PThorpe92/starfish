@@ -3,10 +3,10 @@
 namespace App\Models;
 
 
-
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+
 
 class ProviderPlatform extends Model
 {
@@ -21,6 +21,7 @@ class ProviderPlatform extends Model
         'base_url',
         'icon_url',
     ];
+
 
 
     public function __construct(array $attributes = [])
@@ -43,4 +44,5 @@ class ProviderPlatform extends Model
     {
         return $this->hasMany(StudentMapping::class, "provider_platform_id");
     }
+
 }

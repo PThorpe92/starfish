@@ -23,6 +23,7 @@ class PlatformConnection extends Model
         'consumer_platform',
         'provider_platform',
     ];
+
     public function consumerPlatform(): BelongsTo
     {
         return $this->belongsTo(ConsumerPlatform::class);

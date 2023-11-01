@@ -31,16 +31,13 @@ const ANONYMOUS_SUBMISSIONS = 'anonymous_submissions/';
 use App\Models\ProviderUserResource;
 
 class CanvasServices
-
 {
     private int $provider_id;
     private int $account_id;
     private string $access_key;
     private string $base_url;
-
     private string $api_url;
     public Client $client;
-
 
     public function __construct(int $providerId, int $accountId, string $apiKey, string $url)
     {
@@ -48,7 +45,6 @@ class CanvasServices
         $this->account_id = $accountId;
         $this->access_key =  $apiKey;
         $this->base_url = $url;
-
         $this->api_url = $url . CANVAS_API;
         $this->client = $this->getClient();
     }
@@ -279,6 +275,7 @@ class CanvasServices
         }
         return response()->json(['error' => 'invalid request body'], 400);
     }
+
     /**
      * Get a list of users from Canvas
      *
@@ -296,6 +293,7 @@ class CanvasServices
             $response = $this->client->get($base_url);
         } catch (RequestException $e) {
             throw new \Exception(API_ERROR . $e->getMessage());
+
         }
         return self::handleResponse($response);
     }
@@ -314,6 +312,7 @@ class CanvasServices
         } catch (RequestException $e) {
             throw new \Exception(API_ERROR . $e->getMessage());
 
+
         }
         return self::handleResponse($response);
     }
@@ -329,6 +328,7 @@ class CanvasServices
      */
     public function createStudentInCanvas(string $name, string $email, bool $terms = true): mixed
     {
+
         $userData = [
             'user' => [
                 'name' => $name,
@@ -378,7 +378,6 @@ class CanvasServices
      */
     public function getActivityStreamSummary(string $account = 'self'): mixed
     {
-
         $base_url = $this->api_url . USERS .  self::fmtUrl($account) . ACTIVITY_STREAM . 'summary';
         try {
             $response = $this->client->get($base_url);
